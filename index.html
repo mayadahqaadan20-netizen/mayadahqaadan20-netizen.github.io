@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Player</title>
+<style>
+:root{--bg:#0d0f12;--panel:#171a1f;--ink:#ecebe6;--dim:#8c919a;--acc:#f2b84b;--bar:rgba(13,15,18,.86);--r:6px}
+body[data-skin="aurora"]{--bg:#0b0b1a;--panel:#17172e;--acc:#7cf0d4;--bar:linear-gradient(90deg,rgba(60,30,120,.88),rgba(10,70,90,.88));--r:14px}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+body{display:flex;flex-direction:column;gap:16px;padding:16px;max-width:960px;margin:auto}
+body.embedded{padding:0;gap:0;max-width:none}
+.player{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:var(--r);overflow:hidden}
+body.embedded .player{height:100%;aspect-ratio:auto;border-radius:0}
+video{width:100%;height:100%;display:block;background:#000}
+.bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bar);transition:opacity .2s}
+.player.idle .bar{opacity:0}
+.player.idle{cursor:none}
+button{all:unset;cursor:pointer;padding:6px 9px;border-radius:calc(var(--r)/2);color:var(--ink);font-weight:600}
+button:hover{background:rgba(255,255,255,.12)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+button[aria-pressed="true"]{color:var(--acc)}
+input[type=range]{accent-color:var(--acc);cursor:pointer}
+#seek{flex:1;min-width:60px}
+#vol{width:70px}
+.time{color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+#big{position:absolute;inset:0 0 44px 0;cursor:pointer}
+.hint{color:var(--dim);margin:0}
+.hint code{background:var(--panel);padding:1px 6px;border-radius:4px;color:var(--ink)}
+#log{margin:0;background:var(--panel);padding:12px;border-radius:var(--r);height:180px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--dim)}
+body.embedded .hint,body.embedded #log,body.embedded h1{display:none}
+h1{font-size:18px;margin:0;font-weight:700}
+</style>
+</head>
+<body>
+<h1>My Player</h1>
+<div class="player" id="player">
+  <video id="v" playsinline crossorigin="anonymous" preload="metadata"></video>
+  <div id="big" title="Play / pause"></div>
+  <div class="bar">
+    <button id="play" aria-label="Play">Play</button>
+    <span class="time" id="time">0:00 / 0:00</span>
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Seek">
+    <button id="mute" aria-label="Mute">Vol</button>
+    <input type="range" id="vol" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+    <button id="cc" aria-pressed="false" aria-label="Subtitles">CC</button>
+    <button id="pip" aria-pressed="false" aria-label="Picture in picture">PiP</button>
+    <button id="fs" aria-label="Fullscreen">Full</button>
+  </div>
+</div>
+<p class="hint">Options: <code>?autoplay=on</code> <code>?skin=aurora|onyx</code> <code>?src=VIDEO_URL</code> <code>?sub_url[]=URL&amp;sub_label[]=Label</code></p>
+<pre id="log" aria-live="off"></pre>
+
+<script>
+(function () {
+  // ---- CONFIG: swap in your own video here (must be a video you have the rights to show) ----
+  // Default: "Big Buck Bunny" (c) Blender Foundation, licensed CC BY 3.0 - https://peach.blender.org
+  var DEFAULT_SRC = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+
+  var q = new URLSearchParams(location.search);
+  var $ = function (id) { return document.getElementById(id); };
+  var v = $("v"), player = $("player"), logEl = $("log");
+  var embedded = window.parent !== window;
+  if (embedded) document.body.classList.add("embedded");
+
+  // ---- URL options ----
+  var skin = q.get("skin") === "aurora" ? "aurora" : "onyx";
+  document.body.dataset.skin = skin;
+  v.src = q.get("src") || DEFAULT_SRC;
+
+  // Subtitles: ?sub_url[]=...&sub_label[]=...  (hosting server must send Access-Control-Allow-Origin: *)
+  var subUrls = q.getAll("sub_url[]"), subLabels = q.getAll("sub_label[]");
+  subUrls.forEach(function (u, i) {
+    var t = document.createElement("track");
+    t.kind = "subtitles"; t.src = u;
+    t.label = subLabels[i] || "Subtitles " + (i + 1);
+    if (i === 0) t.default = true;
+    v.appendChild(t);
+  });
+  $("cc").style.display = subUrls.length ? "" : "none";
+
+  // ---- helpers ----
+  function fmt(s) {
+    if (!isFinite(s)) return "0:00";
+    var m = Math.floor(s / 60), x = Math.floor(s % 60);
+    return m + ":" + (x < 10 ? "0" : "") + x;
+  }
+  function log(msg) {
+    logEl.textContent += msg + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function emit(event, info) {
+    log("event: " + event + " | " + JSON.stringify(info || {}));
+    if (embedded) parent.postMessage({ source: "my_player", event: event, info: info || {} }, "*");
+  }
+  function snap() { return { currentTime: v.currentTime, duration: v.duration || 0, volume: v.volume, muted: v.muted }; }
+
+  // ---- actions ----
+  function toggle() { v.paused ? v.play().catch(function (e) { log("play blocked: " + e.message); }) : v.pause(); }
+  function togglePip() {
+    if (!document.pictureInPictureEnabled || v.disablePictureInPicture) { log("Picture-in-picture is not supported here."); return; }
+    (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(function (e) { log("PiP error: " + e.message); });
+  }
+  function toggleFs() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (player.requestFullscreen) player.requestFullscreen().catch(function () {});
+  }
+  function toggleCc() {
+    var tt = v.textTracks; if (!tt.length) return;
+    var on = tt[0].mode !== "showing";
+    for (var i = 0; i < tt.length; i++) tt[i].mode = (on && i === 0) ? "showing" : "disabled";
+    $("cc").setAttribute("aria-pressed", on);
+  }
+
+  // ---- controls ----
+  $("play").onclick = $("big").onclick = toggle;
+  $("mute").onclick = function () { v.muted = !v.muted; };
+  $("vol").oninput = function () { v.volume = +this.value; v.muted = false; };
+  $("seek").oninput = function () { if (v.duration) v.currentTime = (this.value / 1000) * v.duration; };
+  $("pip").onclick = togglePip;
+  $("fs").onclick = toggleFs;
+  $("cc").onclick = toggleCc;
+  if (!document.pictureInPictureEnabled) $("pip").style.display = "none";
+
+  document.addEventListener("keydown", function (e) {
+    if (/input|textarea/i.test(e.target.tagName) && e.target.type !== "range") return;
+    var k = e.key.toLowerCase();
+    if (k === " " || k === "k") { e.preventDefault(); toggle(); }
+    else if (k === "arrowright") v.currentTime += 5;
+    else if (k === "arrowleft") v.currentTime -= 5;
+    else if (k === "m") v.muted = !v.muted;
+    else if (k === "f") toggleFs();
+    else if (k === "p") togglePip();
+    else if (k === "c") toggleCc();
+  });
+
+  // hide the bar when idle during playback
+  var idleT;
+  function wake() { player.classList.remove("idle"); clearTimeout(idleT); if (!v.paused) idleT = setTimeout(function () { player.classList.add("idle"); }, 2500); }
+  player.addEventListener("mousemove", wake);
+  player.addEventListener("touchstart", wake, { passive: true });
+
+  // ---- video events ----
+  var lastTick = 0;
+  v.addEventListener("play", function () { $("play").textContent = "Pause"; wake(); emit("play", snap()); });
+  v.addEventListener("pause", function () { $("play").textContent = "Play"; wake(); emit("pause", snap()); });
+  v.addEventListener("ended", function () { emit("ended", snap()); });
+  v.addEventListener("seeked", function () { emit("seeked", snap()); });
+  v.addEventListener("volumechange", function () {
+    $("mute").textContent = v.muted || v.volume === 0 ? "Muted" : "Vol";
+    $("vol").value = v.muted ? 0 : v.volume;
+    emit("volumechange", snap());
+  });
+  v.addEventListener("loadedmetadata", function () { $("time").textContent = "0:00 / " + fmt(v.duration); emit("ready", snap()); });
+  v.addEventListener("error", function () { log("Video failed to load. Check the source URL and that the host allows hotlinking/CORS."); emit("error", {}); });
+  v.addEventListener("timeupdate", function () {
+    if (v.duration) $("seek").value = (v.currentTime / v.duration) * 1000;
+    $("time").textContent = fmt(v.currentTime) + " / " + fmt(v.duration);
+    var now = Date.now();
+    if (now - lastTick > 1000) { lastTick = now; emit("timeupdate", snap()); }
+  });
+  v.addEventListener("enterpictureinpicture", function () { $("pip").setAttribute("aria-pressed", true); emit("pip", { active: true }); });
+  v.addEventListener("leavepictureinpicture", function () { $("pip").setAttribute("aria-pressed", false); emit("pip", { active: false }); });
+
+  // ---- postMessage API: parent page -> player ----
+  // frame.contentWindow.postMessage({ source: "my_player_command", command: "seek", value: 60 }, "*")
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (!d || d.source !== "my_player_command") return;
+    log("command: " + d.command + (d.value !== undefined ? " " + d.value : ""));
+    switch (d.command) {
+      case "play": v.play().catch(function (err) { log("play blocked: " + err.message); }); break;
+      case "pause": v.pause(); break;
+      case "seek": v.currentTime = +d.value || 0; break;
+      case "volume": v.volume = Math.min(1, Math.max(0, d.value / 100)); v.muted = false; break;
+      case "mute": v.muted = true; break;
+      case "unmute": v.muted = false; break;
+      case "pip": togglePip(); break;
+      case "fullscreen": toggleFs(); break;
+    }
+  });
+
+  // autoplay (browsers only allow it muted, so we mute and tell you)
+  if (q.get("autoplay") === "on") {
+    v.muted = true;
+    v.play().catch(function (e) { log("autoplay blocked: " + e.message); });
+  }
+  log("Ready. Keys: space/k play, arrows seek, m mute, f fullscreen, p picture-in-picture, c captions.");
+})();
+</script>
+</body>
+</html>
